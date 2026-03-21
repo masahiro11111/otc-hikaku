@@ -2,7 +2,6 @@ name: Weekly PMDA Update
 
 on:
   schedule:
-    # 毎週日曜 JST 02:00（UTC 17:00）
     - cron: "0 17 * * 6"
   workflow_dispatch:
     inputs:
@@ -40,7 +39,7 @@ jobs:
       - name: 依存インストール
         run: pip install selenium webdriver-manager
 
-      - name: medicines.json が空なら既存データで初期化
+      - name: medicines.json 確認
         run: |
           python3 -c "
           import json
@@ -48,11 +47,10 @@ jobs:
           p = Path('scraper/medicines.json')
           try:
               d = json.loads(p.read_text())
-              meds = d.get('medicines', [])
-              print(f'既存データ: {len(meds)}件')
-          except:
+              print('既存データ:', len(d.get('medicines', [])), '件')
+          except Exception as e:
               p.write_text('{\"medicines\":[],\"updated_at\":\"\",\"total\":0}')
-              print('medicines.json を初期化しました')
+              print('初期化しました')
           "
 
       - name: PMDAスクレイピング
@@ -69,10 +67,16 @@ jobs:
       - name: index.html ビルド
         run: python scraper/build.py --output index.html
 
+      - name: 件数を取得
+        id: count
+        run: |
+          COUNT=$(python3 -c "import json; d=json.load(open('scraper/medicines.json')); print(d.get('total',0))")
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
       - name: コミット＆プッシュ
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add index.html scraper/medicines.json
-          git diff --staged --quiet || git commit -m "PMDA update: $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST') $(python3 -c \"import json; d=json.load(open('scraper/medicines.json')); print(str(d.get('total',0))+'件')\")"
+          git diff --staged --quiet || git commit -m "PMDA update: ${{ steps.count.outputs.count }}件"
           git push
