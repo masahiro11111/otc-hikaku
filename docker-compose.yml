@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: otc_medicines
+      POSTGRES_USER: otc
+      POSTGRES_PASSWORD: otcpassword
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U otc"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://otc:otcpassword@db:5432/otc_medicines
+    ports:
+      - "5000:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./scraper:/app/scraper   # medicines.json をマウント
+    command: >
+      sh -c "python -c 'from app import app, db; 
+             app.app_context().push(); db.create_all()' &&
+             gunicorn -w 2 -b 0.0.0.0:5000 app:app"
+
+  scraper:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://otc:otcpassword@db:5432/otc_medicines
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./scraper:/app/scraper
+    # cron代わりに手動実行: docker compose run scraper python scraper/pmda_scraper.py
+    profiles: ["scraper"]
+
+volumes:
+  pgdata:

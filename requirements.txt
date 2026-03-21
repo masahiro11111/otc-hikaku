@@ -1,0 +1,20 @@
+# Flask API
+flask==3.1.0
+flask-sqlalchemy==3.1.1
+flask-cors==5.0.0
+sqlalchemy==2.0.36
+
+# DB
+psycopg2-binary==2.9.9   # PostgreSQL（本番用）
+
+# スクレイピング
+playwright==1.49.0
+beautifulsoup4==4.12.3
+lxml==5.3.0
+
+# 価格取得
+requests==2.32.3
+
+# ユーティリティ
+python-dotenv==1.0.1
+gunicorn==23.0.0          # 本番サーバー
