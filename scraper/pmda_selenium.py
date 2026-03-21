@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 pmda_selenium.py - PMDA OTC添付文書スクレイパー
-名称検索（空白=全件）でページネーションしながら全品目を取得する。
+検索ボタンをクリックして結果を取得する方式。
 PMDAは政府公開情報（著作権法第13条）→ 商用利用可
 """
 
@@ -12,10 +12,12 @@ from datetime import datetime, timezone
 try:
     from selenium import webdriver
     from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support.ui import WebDriverWait, Select
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.webdriver.chrome.options import Options
-    from selenium.common.exceptions import TimeoutException, NoSuchElementException
+    from selenium.common.exceptions import (
+        TimeoutException, NoSuchElementException, StaleElementReferenceException
+    )
     try:
         from webdriver_manager.chrome import ChromeDriverManager
         from selenium.webdriver.chrome.service import Service
@@ -32,16 +34,10 @@ CACHE_DIR = DATA_DIR / "pmda_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 LOG_PATH  = DATA_DIR / "scraper.log"
 
-# 名称空白検索で全件ヒット・100件/ページ
-PMDA_SEARCH = (
-    "https://www.pmda.go.jp/PmdaSearch/otcSearch"
-    "?pageNum={page}&pageSize=100&kansen=0"
-    "&name=&senHead=0"          # 名称空白=全件
-    "&tenpu_flg=1"              # 添付文書あり
-)
-
-PAGE_DELAY = 2.5   # ページ間待機（秒）
-DET_DELAY  = 2.0   # 詳細ページ待機（秒）
+PMDA_SEARCH = "https://www.pmda.go.jp/PmdaSearch/otcSearch"
+PAGE_DELAY  = 3.0
+DET_DELAY   = 2.0
+WAIT_SEC    = 15
 
 WARN_CHECK   = ["アリルイソプロピルアセチル尿素","ブロムワレリル尿素",
                 "ジヒドロコデインリン酸塩","コデインリン酸塩","ジヒドロコデイン"]
@@ -80,8 +76,8 @@ SYM_MAP = [
     ("神経痛",["神経痛"]),("のど痛",["咽喉痛","のどの痛み"]),
     ("鼻水",["鼻水"]),("くしゃみ",["くしゃみ"]),("鼻づまり",["鼻づまり"]),
     ("花粉症",["花粉症","アレルギー性鼻炎"]),
-    ("目のかゆみ",["目のかゆみ","眼のかゆみ"]),("充血",["充血"]),
-    ("目の疲れ",["眼精疲労","目の疲れ"]),("乾き目",["乾き目","ドライアイ"]),
+    ("目のかゆみ",["目のかゆみ"]),("充血",["充血"]),
+    ("目の疲れ",["眼精疲労","目の疲れ"]),("乾き目",["乾き目"]),
     ("せき",["せき","咳"]),("たん",["たん","痰"]),
     ("胃痛",["胃痛"]),("胸やけ",["胸やけ"]),("胃もたれ",["胃もたれ"]),
     ("食べ過ぎ",["食べ過ぎ"]),("飲み過ぎ",["飲み過ぎ","二日酔"]),
@@ -112,8 +108,7 @@ def make_driver():
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1280,900")
     opts.add_argument("--lang=ja-JP")
-    opts.add_argument(
-        "user-agent=Mozilla/5.0 (compatible; OTC-Hikaku/2.0)")
+    opts.add_argument("user-agent=Mozilla/5.0 (compatible; OTC-Hikaku/2.0)")
     if USE_WDM:
         service = Service(ChromeDriverManager().install())
         return webdriver.Chrome(service=service, options=opts)
@@ -139,16 +134,74 @@ def write_cache(url, data):
     cache_path(url).write_text(
         json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-# ── リスト取得 ────────────────────────────────────────
+# ── 初回検索（ボタンクリック） ────────────────────────
 
-def get_list_page(driver, page_num):
-    """1ページ分の品目リスト (items, has_next, total) を返す"""
-    url = PMDA_SEARCH.format(page=page_num)
-    log(f"  リスト p{page_num}: {url}")
-    driver.get(url)
+def do_initial_search(driver, wait):
+    """
+    検索ページを開いて「100件表示」に変更し、
+    検索ボタンをクリックして最初の結果を表示する。
+    """
+    log("検索ページを開く...")
+    driver.get(PMDA_SEARCH)
     time.sleep(PAGE_DELAY)
 
-    # JS で全リンクを取得
+    # 表示件数を100件に変更
+    try:
+        size_links = driver.find_elements(By.XPATH, "//a[text()='100件']")
+        if size_links:
+            size_links[0].click()
+            time.sleep(2)
+            log("表示件数を100件に変更")
+        else:
+            # JSで100件を選択
+            driver.execute_script("""
+                var links = document.querySelectorAll('a');
+                for(var i=0;i<links.length;i++){
+                    if(links[i].textContent.trim()==='100件'){
+                        links[i].click(); break;
+                    }
+                }
+            """)
+            time.sleep(2)
+    except Exception as e:
+        log(f"表示件数変更エラー（続行）: {e}")
+
+    # 検索ボタンをクリック（名称欄は空=全件）
+    try:
+        # 「添付文書」チェックボックスを確認・チェック
+        checkboxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+        log(f"チェックボックス数: {len(checkboxes)}")
+
+        # 検索ボタンを探す
+        search_btns = driver.find_elements(By.CSS_SELECTOR,
+            "input[type='submit'], button[type='submit'], "
+            "input[type='image'][src*='Search'], "
+            "a[href*='javascript'][onclick*='search'], "
+            "img[src*='SearchBtn']")
+        log(f"検索ボタン候補数: {len(search_btns)}")
+
+        if search_btns:
+            search_btns[0].click()
+        else:
+            # JSで検索実行
+            driver.execute_script("""
+                var forms = document.querySelectorAll('form');
+                if(forms.length > 0) forms[0].submit();
+            """)
+        time.sleep(PAGE_DELAY)
+        log("検索実行")
+    except Exception as e:
+        log(f"検索ボタンクリックエラー: {e}")
+
+    # ページ内容確認
+    body = driver.find_element(By.TAG_NAME, "body").text
+    log(f"検索後ページ内容(先頭200字): {body[:200]}")
+    return body
+
+# ── リスト取得 ────────────────────────────────────────
+
+def extract_items_from_page(driver):
+    """現在のページから品目リンクを抽出"""
     raw = driver.execute_script("""
         var out = [];
         document.querySelectorAll('a[href]').forEach(function(a) {
@@ -157,7 +210,7 @@ def get_list_page(driver, page_num):
             if (text.length > 1 && (
                 href.indexOf('otcDetail') > -1 ||
                 href.indexOf('Detail')    > -1 ||
-                href.indexOf('detail')    > -1
+                href.indexOf('rdDetail')  > -1
             )) {
                 out.push({name: text, href: href});
             }
@@ -176,31 +229,21 @@ def get_list_page(driver, page_num):
         if href not in seen:
             seen.add(href)
             items.append({"name": name, "url": href})
+    return items
 
-    # 次ページ確認
-    has_next = bool(driver.execute_script("""
-        var links = document.querySelectorAll('a');
-        for (var i = 0; i < links.length; i++) {
-            if (links[i].textContent.trim() === '次へ') return true;
-        }
-        return false;
-    """))
-
-    # 総件数取得（ページ上部の「X件中 Y-Z件」のテキストから）
-    total_text = driver.execute_script("""
-        var body = document.body.innerText;
-        var m = body.match(/(\\d[\\d,]+)\\s*件/);
-        return m ? m[1].replace(',','') : '0';
-    """) or "0"
-
-    log(f"  → {len(items)}件取得 / 次ページ:{has_next} / 総件数表示:{total_text}")
-
-    # デバッグ: 0件なら body の先頭を表示
-    if len(items) == 0:
-        body = driver.find_element(By.TAG_NAME, "body").text[:300]
-        log(f"  ⚠ 0件。ページ内容(先頭300字): {body}")
-
-    return items, has_next
+def go_next_page(driver):
+    """次へリンクをクリック。成功したらTrue"""
+    try:
+        next_link = driver.find_element(By.XPATH,
+            "//a[text()='次へ' or text()='次ページ' or contains(@class,'next')]")
+        next_link.click()
+        time.sleep(PAGE_DELAY)
+        return True
+    except NoSuchElementException:
+        return False
+    except Exception as e:
+        log(f"次ページ移動エラー: {e}")
+        return False
 
 # ── 詳細取得 ─────────────────────────────────────────
 
@@ -221,7 +264,7 @@ def get_detail(driver, item):
         effect = extract_between(body,
             ["効能又は効果","効能・効果","効能効果"],
             ["用法及び用量","用法・用量","【用法"])
-        risk = parse_risk(body)
+        risk  = parse_risk(body)
         maker = extract_between(body,
             ["販売会社名","製造販売元","会社名"],
             ["\n\n","\n※","\n【"])
@@ -240,11 +283,11 @@ def get_detail(driver, item):
     return result
 
 def parse_risk(body):
-    if   "要指導"                      in body: return 0
+    if   "要指導"                           in body: return 0
     elif "指定第２類" in body or "指定第2類" in body: return 2
-    elif "第１類"    in body or "第1類"  in body: return 1
-    elif "第２類"    in body or "第2類"  in body: return 2.5
-    elif "第３類"    in body or "第3類"  in body: return 3
+    elif "第１類"     in body or "第1類"     in body: return 1
+    elif "第２類"     in body or "第2類"     in body: return 2.5
+    elif "第３類"     in body or "第3類"     in body: return 3
     return 2.5
 
 def parse_ings(driver, body):
@@ -257,12 +300,10 @@ def parse_ings(driver, body):
                 ths = [c.text.strip() for c in row.find_elements(By.TAG_NAME,"th")]
                 tds = [c.text.strip() for c in row.find_elements(By.TAG_NAME,"td")]
                 if any("成分" in t or "分量" in t for t in ths):
-                    in_ing = True
-                    continue
+                    in_ing = True; continue
                 if in_ing:
                     val = tds[0] if tds else ""
-                    if not val:
-                        break
+                    if not val: break
                     if not any(s in val for s in ["添加物","合計","注","備考"]):
                         ings.append(val)
     except Exception:
@@ -274,47 +315,37 @@ def parse_ings(driver, body):
         for line in re.split(r"[\n、，,/]", sec or ""):
             line = line.strip()
             if 2 <= len(line) <= 60 and not line[0].isdigit():
-                name = re.split(r"\s+\d|\(|\（", line)[0].strip()
-                if name and name not in ings:
-                    ings.append(name)
+                n2 = re.split(r"\s+\d|\(|\（", line)[0].strip()
+                if n2 and n2 not in ings:
+                    ings.append(n2)
     return ings[:20]
 
 def extract_between(text, starts, ends):
     for s in starts:
         idx = text.find(s)
-        if idx < 0:
-            continue
+        if idx < 0: continue
         rest = text[idx+len(s):]
         end_pos = len(rest)
         for e in ends:
             p = rest.find(e)
-            if 0 < p < end_pos:
-                end_pos = p
+            if 0 < p < end_pos: end_pos = p
         content = rest[:end_pos].strip()
-        if content:
-            return content
+        if content: return content
     return ""
 
 def enrich(d):
     ings    = d.get("ings", [])
     effect  = d.get("effect", "")
     ing_str = " ".join(ings)
-
     warn_ings = [w for w in WARN_CHECK if w in ing_str]
     drowsy    = any(k in ing_str for k in DROWSY_CHECK)
-
     text = f"{effect} {ing_str} {d.get('name','')}"
     cat  = "vitamin"
     for cid, kws in CAT_MAP:
-        if any(k in text for k in kws):
-            cat = cid
-            break
-
+        if any(k in text for k in kws): cat = cid; break
     syms = []
     for sym, kws in SYM_MAP:
-        if any(k in effect for k in kws):
-            syms.append(sym)
-
+        if any(k in effect for k in kws): syms.append(sym)
     notes = []
     for w in warn_ings:
         if "アリルイソプロピルアセチル尿素" in w:
@@ -325,18 +356,13 @@ def enrich(d):
             notes.append("⚠ブ尿素含有：海外規制済・依存リスク。")
     if drowsy and not notes:
         notes.append("眠気が出ることあり。自動車運転注意。")
-
     d.update({
-        "cat":      cat,
-        "symptoms": syms[:8],
-        "warnIngs": warn_ings,
-        "drowsy":   drowsy,
+        "cat": cat, "symptoms": syms[:8], "warnIngs": warn_ings,
+        "drowsy": drowsy,
         "noteType": "danger" if warn_ings else ("warn" if drowsy else ""),
-        "note":     " ".join(notes),
-        "source":   "pmda",
-        "asin":     d.get("asin",""),
-        "rakuten_url": d.get("rakuten_url",""),
-        "price":    d.get("price"),
+        "note": " ".join(notes),
+        "source": "pmda", "asin": d.get("asin",""),
+        "rakuten_url": d.get("rakuten_url",""), "price": d.get("price"),
     })
     if "id" not in d:
         d["id"] = int(hashlib.md5(d["name"].encode()).hexdigest()[:8], 16) % 1000000
@@ -345,32 +371,24 @@ def enrich(d):
 # ── データ管理 ────────────────────────────────────────
 
 def load_existing():
-    if not OUTPUT.exists():
-        return []
+    if not OUTPUT.exists(): return []
     try:
-        return json.loads(
-            OUTPUT.read_text(encoding="utf-8")).get("medicines", [])
-    except Exception:
-        return []
+        return json.loads(OUTPUT.read_text(encoding="utf-8")).get("medicines",[])
+    except Exception: return []
 
 def save(meds):
-    data = {
-        "medicines":  meds,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "total":      len(meds),
-        "source":     "pmda_selenium",
-    }
-    OUTPUT.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    data = {"medicines": meds,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "total": len(meds), "source": "pmda_selenium"}
+    OUTPUT.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                      encoding="utf-8")
     log(f"保存: {len(meds)}件")
 
 def _merge(existing, new_items):
     seen, out = set(), []
     for m in (existing + new_items):
         n = m.get("name","")
-        if n and n not in seen:
-            seen.add(n)
-            out.append(m)
+        if n and n not in seen: seen.add(n); out.append(m)
     return out
 
 # ── メイン ────────────────────────────────────────────
@@ -382,16 +400,21 @@ def run(limit=0, resume=False):
     log(f"既存: {len(existing)}件")
 
     driver    = make_driver()
+    wait      = WebDriverWait(driver, WAIT_SEC)
     new_items = []
     found     = 0
     page_num  = 1
 
     try:
+        # 最初だけ検索ボタンをクリックして結果を表示
+        do_initial_search(driver, wait)
+
         while True:
-            items, has_next = get_list_page(driver, page_num)
+            items = extract_items_from_page(driver)
+            log(f"p{page_num}: {len(items)}件取得")
 
             if len(items) == 0:
-                log(f"  p{page_num} で0件取得。終了します。")
+                log("0件のため終了")
                 break
 
             for item in items:
@@ -403,22 +426,19 @@ def run(limit=0, resume=False):
                 log(f"  [{found}] {item['name']}")
                 det = get_detail(driver, item)
                 new_items.append(det)
-
                 # 100件ごとに中間保存
                 if len(new_items) % 100 == 0:
-                    merged = _merge(existing, new_items)
-                    save(merged)
+                    save(_merge(existing, new_items))
 
             if limit and found >= limit:
-                log(f"limit={limit} 件に達したため終了")
+                log(f"limit={limit}件に達したため終了")
                 break
 
-            if not has_next:
+            if not go_next_page(driver):
                 log("最終ページに達しました")
                 break
 
             page_num += 1
-            time.sleep(PAGE_DELAY)
 
     except KeyboardInterrupt:
         log("中断されました")
@@ -431,9 +451,7 @@ def run(limit=0, resume=False):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--limit",  type=int, default=0,
-                   help="取得件数上限（0=全件）")
-    p.add_argument("--resume", action="store_true",
-                   help="既存データを保持して差分のみ取得")
+    p.add_argument("--limit",  type=int, default=0)
+    p.add_argument("--resume", action="store_true")
     a = p.parse_args()
     run(limit=a.limit, resume=a.resume)
