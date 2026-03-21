@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 pmda_selenium.py - PMDA OTC添付文書スクレイパー
-検索結果は別ウィンドウで開かれるため、ウィンドウ切り替えが必要。
+「あ」〜「ん」＋「ア」〜「ン」＋「a」〜「z」＋数字で全件検索。
 PMDAは政府公開情報（著作権法第13条）→ 商用利用可
 """
 
@@ -16,7 +16,7 @@ try:
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.webdriver.chrome.options import Options
     from selenium.common.exceptions import (
-        TimeoutException, NoSuchElementException
+        TimeoutException, NoSuchElementException, UnexpectedAlertPresentException
     )
     try:
         from webdriver_manager.chrome import ChromeDriverManager
@@ -38,35 +38,45 @@ PMDA_SEARCH = "https://www.pmda.go.jp/PmdaSearch/otcSearch"
 PAGE_DELAY  = 3.0
 DET_DELAY   = 2.0
 
+# 検索キーワード一覧（部分一致で全件網羅）
+# ひらがな・カタカナ・アルファベット・数字の先頭文字で全品目をカバー
+SEARCH_KEYWORDS = (
+    list("あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん") +
+    list("アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン") +
+    list("abcdefghijklmnopqrstuvwxyz") +
+    list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") +
+    ["1","2","3","4","5","6","7","8","9"]
+)
+
 WARN_CHECK   = ["アリルイソプロピルアセチル尿素","ブロムワレリル尿素",
                 "ジヒドロコデインリン酸塩","コデインリン酸塩","ジヒドロコデイン"]
 DROWSY_CHECK = ["クロルフェニラミン","ジフェンヒドラミン","プロメタジン",
                 "ジフェニルピラリン","コデイン","ジヒドロコデイン"]
 
 CAT_MAP = [
-    ("cold",["解熱","鎮痛","かぜ","感冒","発熱"]),
-    ("stomach",["胃","腸","整腸","下痢","便秘","消化","胸やけ","H2"]),
-    ("allergy",["アレルギー","花粉","蕁麻疹"]),
-    ("cough",["鎮咳","去痰","せき","咳","含嗽"]),
-    ("nose",["鼻炎","鼻水","鼻づまり"]),
-    ("eye",["点眼","眼科","目薬"]),
-    ("ext_pain",["湿布","貼付","肩こり","腰痛","筋肉痛","消炎鎮痛"]),
-    ("ext_skin",["皮膚","湿疹","かぶれ","殺菌","しもやけ"]),
-    ("foot",["水虫","白癬","抗真菌"]),
-    ("hair",["育毛","発毛","脱毛","ミノキシジル"]),
-    ("women",["更年期","月経","婦人"]),
-    ("sleep",["催眠","不眠","睡眠"]),
-    ("vitamin",["ビタミン","滋養","強壮","保健"]),
-    ("kampo",["漢方","生薬"]),
-    ("smoking",["禁煙","ニコチン"]),
-    ("motion",["乗物酔","乗り物"]),
-    ("skin_oral",["シミ","そばかす","美白","肝斑"]),
-    ("anal",["痔","肛門"]),
-    ("disinfect",["消毒","殺菌消毒","エタノール"]),
-    ("test",["検査薬","妊娠","排卵"]),
-    ("circu",["強心","センソ","循環器"]),
-    ("oral",["口腔","咽喉","口内炎","歯痛","歯槽"]),
-    ("joint",["関節","コンドロイチン","グルコサミン"]),
+    ("cold",      ["解熱","鎮痛","かぜ","感冒","発熱"]),
+    ("stomach",   ["胃","腸","整腸","下痢","便秘","消化","胸やけ","H2"]),
+    ("allergy",   ["アレルギー","花粉","蕁麻疹"]),
+    ("cough",     ["鎮咳","去痰","せき","咳","含嗽"]),
+    ("nose",      ["鼻炎","鼻水","鼻づまり"]),
+    ("eye",       ["点眼","眼科","目薬"]),
+    ("ext_pain",  ["湿布","貼付","肩こり","腰痛","筋肉痛","消炎鎮痛"]),
+    ("ext_skin",  ["皮膚","湿疹","かぶれ","殺菌","しもやけ"]),
+    ("foot",      ["水虫","白癬","抗真菌"]),
+    ("hair",      ["育毛","発毛","脱毛","ミノキシジル"]),
+    ("women",     ["更年期","月経","婦人"]),
+    ("sleep",     ["催眠","不眠","睡眠"]),
+    ("vitamin",   ["ビタミン","滋養","強壮","保健"]),
+    ("kampo",     ["漢方","生薬"]),
+    ("smoking",   ["禁煙","ニコチン"]),
+    ("motion",    ["乗物酔","乗り物"]),
+    ("skin_oral", ["シミ","そばかす","美白","肝斑"]),
+    ("anal",      ["痔","肛門"]),
+    ("disinfect", ["消毒","殺菌消毒","エタノール"]),
+    ("test",      ["検査薬","妊娠","排卵"]),
+    ("circu",     ["強心","センソ","循環器"]),
+    ("oral",      ["口腔","咽喉","口内炎","歯痛","歯槽"]),
+    ("joint",     ["関節","コンドロイチン","グルコサミン"]),
 ]
 
 SYM_MAP = [
@@ -129,159 +139,91 @@ def write_cache(url, data):
     data["_at"] = datetime.now().isoformat()
     cache_path(url).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-# ── 検索ページの操作 ──────────────────────────────────
+# ── 1キーワードで検索してリンク一覧を取得 ────────────
 
-def setup_search_page(driver):
+def search_keyword(driver, keyword):
     """
-    検索ページを開いてHTMLソースを取得し、
-    ボタン・フォームの構造をログ出力する。
+    1キーワードで検索し、全ページのリンクを収集して返す。
     """
-    log("検索ページを開いています...")
-    driver.get(PMDA_SEARCH)
-    time.sleep(PAGE_DELAY)
+    all_items = []
+    page_num  = 1
 
-    # ページ上のform, input, button, a タグを全て調査
-    page_info = driver.execute_script("""
-        var info = {forms:[], inputs:[], buttons:[], links_search:[]};
-
-        // form要素
-        document.querySelectorAll('form').forEach(function(f,i){
-            info.forms.push({
-                i: i,
-                action: f.action || '',
-                method: f.method || '',
-                id: f.id || '',
-                name: f.name || ''
-            });
-        });
-
-        // input要素
-        document.querySelectorAll('input').forEach(function(el,i){
-            if(i < 20) info.inputs.push({
-                type: el.type || '',
-                name: el.name || '',
-                id: el.id || '',
-                value: (el.value||'').substring(0,30),
-                src: (el.src||'').substring(0,60)
-            });
-        });
-
-        // button要素
-        document.querySelectorAll('button').forEach(function(el,i){
-            info.buttons.push({
-                type: el.type||'',
-                text: el.textContent.trim().substring(0,30),
-                id: el.id||''
-            });
-        });
-
-        // 「検索」というテキストを含むリンク
-        document.querySelectorAll('a, img').forEach(function(el){
-            var t = el.textContent||''; var src = el.src||''; var alt = el.alt||'';
-            if(t.includes('検索') || src.includes('Search') || src.includes('search') || alt.includes('検索')){
-                info.links_search.push({
-                    tag: el.tagName,
-                    text: t.trim().substring(0,20),
-                    src: src.substring(0,60),
-                    alt: alt,
-                    onclick: (el.getAttribute('onclick')||'').substring(0,60)
-                });
-            }
-        });
-
-        return info;
-    """)
-
-    log(f"フォーム数: {len(page_info.get('forms',[]))}")
-    for f in page_info.get('forms',[]):
-        log(f"  form[{f['i']}]: action={f['action'][:60]} method={f['method']} id={f['id']}")
-
-    log(f"input数: {len(page_info.get('inputs',[]))}")
-    for inp in page_info.get('inputs',[]):
-        log(f"  input: type={inp['type']} name={inp['name']} id={inp['id']} value={inp['value']} src={inp['src']}")
-
-    log(f"button数: {len(page_info.get('buttons',[]))}")
-    for b in page_info.get('buttons',[]):
-        log(f"  button: type={b['type']} text={b['text']} id={b['id']}")
-
-    log(f"検索関連リンク・img数: {len(page_info.get('links_search',[]))}")
-    for ls in page_info.get('links_search',[]):
-        log(f"  {ls['tag']}: text={ls['text']} src={ls['src']} onclick={ls['onclick']}")
-
-    return page_info
-
-def do_search_and_switch(driver):
-    """
-    検索を実行して結果ウィンドウに切り替える。
-    成功したらTrue。
-    """
-    original_window = driver.current_window_handle
-    original_handles = set(driver.window_handles)
-
-    # 100件表示に変更
-    try:
-        driver.execute_script("""
-            var links = document.querySelectorAll('a');
-            for(var i=0;i<links.length;i++){
-                if(links[i].textContent.trim()==='100件'){
-                    links[i].click(); return '100件クリック';
-                }
-            }
-            return 'not found';
-        """)
+    while True:
+        driver.get(PMDA_SEARCH)
         time.sleep(1.5)
-    except Exception as e:
-        log(f"100件設定エラー（続行）: {e}")
 
-    # 検索ボタンを探してクリック
-    clicked = driver.execute_script("""
-        // image型のinputで検索ボタンを探す
-        var inputs = document.querySelectorAll('input[type="image"], input[type="submit"]');
-        for(var i=0;i<inputs.length;i++){
-            var src = inputs[i].src || '';
-            var val = inputs[i].value || '';
-            if(src.indexOf('Search') > -1 || src.indexOf('search') > -1
-               || val.indexOf('検索') > -1){
-                inputs[i].click();
-                return 'input clicked: ' + src;
-            }
-        }
-        // imgタグで検索ボタンを探す
-        var imgs = document.querySelectorAll('img[src*="Search"], img[src*="search"]');
-        if(imgs.length > 0){ imgs[0].click(); return 'img clicked: ' + imgs[0].src; }
+        try:
+            # アラートが残っていれば閉じる
+            alert = driver.switch_to.alert
+            alert.accept()
+            time.sleep(0.5)
+        except Exception:
+            pass
 
-        // aタグ onclick に search が含まれるもの
-        var links = document.querySelectorAll('a[onclick]');
-        for(var i=0;i<links.length;i++){
-            var oc = links[i].getAttribute('onclick') || '';
-            if(oc.indexOf('search') > -1 || oc.indexOf('Search') > -1){
-                links[i].click();
-                return 'a clicked: ' + oc.substring(0,50);
-            }
-        }
-        // フォームを直接submit
-        var forms = document.querySelectorAll('form');
-        if(forms.length > 0){ forms[0].submit(); return 'form submitted'; }
-        return 'nothing clicked';
-    """)
-    log(f"検索クリック結果: {clicked}")
-    time.sleep(PAGE_DELAY)
+        # 名称欄にキーワードを入力（部分一致）
+        name_input = driver.find_element(By.ID, "txtName")
+        name_input.clear()
+        name_input.send_keys(keyword)
 
-    # 新しいウィンドウが開いたか確認
-    new_handles = set(driver.window_handles) - original_handles
-    if new_handles:
-        new_window = new_handles.pop()
-        driver.switch_to.window(new_window)
-        log(f"新ウィンドウに切り替え: {driver.current_url}")
-        return True
-    else:
-        log(f"新ウィンドウなし。現在URL: {driver.current_url}")
-        # 同じウィンドウで結果が出ているかもしれないので確認
-        body = driver.find_element(By.TAG_NAME, "body").text[:300]
-        log(f"現在ページ内容: {body}")
-        return False
+        # 100件表示に変更（select要素かリンクで）
+        try:
+            driver.execute_script("""
+                var links = document.querySelectorAll('a');
+                for(var i=0;i<links.length;i++){
+                    if(links[i].textContent.trim()==='100件'){
+                        links[i].click(); break;
+                    }
+                }
+            """)
+            time.sleep(0.5)
+        except Exception:
+            pass
 
-# ── リスト・詳細取得 ──────────────────────────────────
+        # ページ番号をhiddenフィールドにセット（2ページ目以降）
+        if page_num > 1:
+            try:
+                driver.execute_script(
+                    f"var el = document.querySelector('input[name=\"pageNum\"]');"
+                    f"if(el) el.value = '{page_num}';"
+                )
+            except Exception:
+                pass
+
+        # 検索ボタンをクリック（input[type=image][name=btnA]）
+        original_handles = set(driver.window_handles)
+        driver.find_element(By.CSS_SELECTOR, "input[type='image'][name='btnA']").click()
+        time.sleep(PAGE_DELAY)
+
+        # アラート処理
+        try:
+            alert = driver.switch_to.alert
+            log(f"  アラート: {alert.text}")
+            alert.accept()
+            break
+        except Exception:
+            pass
+
+        # 新ウィンドウに切り替え
+        new_handles = set(driver.window_handles) - original_handles
+        if new_handles:
+            driver.switch_to.window(new_handles.pop())
+        
+        time.sleep(1.0)
+
+        # リンク抽出
+        items = extract_items(driver)
+        all_items.extend(items)
+
+        # 次ページ
+        if not go_next(driver):
+            break
+        page_num += 1
+
+        # 同じウィンドウでページ遷移する場合は再検索不要
+        if page_num > 1 and len(items) > 0:
+            continue
+
+    return all_items
 
 def extract_items(driver):
     raw = driver.execute_script("""
@@ -306,18 +248,20 @@ def extract_items(driver):
         if not href.startswith("http"):
             href = "https://www.pmda.go.jp" + href
         if href not in seen:
-            seen.add(href); items.append({"name":name,"url":href})
+            seen.add(href)
+            items.append({"name": name, "url": href})
     return items
 
 def go_next(driver):
     try:
-        nxt = driver.find_element(By.XPATH,
-            "//a[text()='次へ' or text()='次ページ']")
+        nxt = driver.find_element(By.XPATH, "//a[text()='次へ' or text()='次ページ']")
         nxt.click()
         time.sleep(PAGE_DELAY)
         return True
     except NoSuchElementException:
         return False
+
+# ── 詳細取得 ─────────────────────────────────────────
 
 def get_detail(driver, item):
     url = item["url"]
@@ -330,7 +274,7 @@ def get_detail(driver, item):
     try:
         driver.get(url)
         time.sleep(DET_DELAY)
-        body = driver.find_element(By.TAG_NAME,"body").text
+        body = driver.find_element(By.TAG_NAME, "body").text
 
         ings   = parse_ings(driver, body)
         effect = extract_between(body,
@@ -431,6 +375,8 @@ def enrich(d):
         d["id"] = int(hashlib.md5(d["name"].encode()).hexdigest()[:8],16) % 1000000
     return d
 
+# ── データ管理 ────────────────────────────────────────
+
 def load_existing():
     if not OUTPUT.exists(): return []
     try:
@@ -450,6 +396,8 @@ def _merge(existing, new_items):
         if n and n not in seen: seen.add(n); out.append(m)
     return out
 
+# ── メイン ────────────────────────────────────────────
+
 def run(limit=0, resume=False):
     log(f"PMDA OTC スクレイパー開始 limit={limit} resume={resume}")
     existing       = load_existing()
@@ -461,42 +409,35 @@ def run(limit=0, resume=False):
     found     = 0
 
     try:
-        # まずページ構造を調査
-        setup_search_page(driver)
+        for kw_idx, kw in enumerate(SEARCH_KEYWORDS):
+            log(f"キーワード [{kw_idx+1}/{len(SEARCH_KEYWORDS)}]: 「{kw}」")
 
-        # 検索実行・ウィンドウ切り替え
-        success = do_search_and_switch(driver)
-        if not success:
-            log("検索結果ウィンドウへの切り替えに失敗。終了します。")
-            return
+            try:
+                kw_items = search_keyword(driver, kw)
+            except Exception as e:
+                log(f"  検索エラー「{kw}」: {e}")
+                continue
 
-        page_num = 1
-        while True:
-            items = extract_items(driver)
-            log(f"p{page_num}: {len(items)}件")
+            log(f"  → {len(kw_items)}件ヒット")
 
-            if len(items) == 0:
-                body = driver.find_element(By.TAG_NAME,"body").text[:400]
-                log(f"0件。ページ内容: {body}")
-                break
-
-            for item in items:
+            for item in kw_items:
                 found += 1
                 if limit and found > limit: break
-                if resume and item["name"] in existing_names: continue
+                if item["name"] in existing_names: continue  # 重複スキップ
+
                 log(f"  [{found}] {item['name']}")
                 det = get_detail(driver, item)
                 new_items.append(det)
+                existing_names.add(item["name"])  # 追加済みとして登録
+
                 if len(new_items) % 100 == 0:
                     save(_merge(existing, new_items))
 
             if limit and found >= limit:
-                log(f"limit={limit}件に達したため終了"); break
+                log(f"limit={limit}件に達したため終了")
+                break
 
-            if not go_next(driver):
-                log("最終ページ"); break
-
-            page_num += 1
+            time.sleep(1.0)
 
     except KeyboardInterrupt:
         log("中断")
