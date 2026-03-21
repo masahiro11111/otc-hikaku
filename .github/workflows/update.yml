@@ -2,17 +2,16 @@ name: Weekly PMDA Update
 
 on:
   schedule:
-    # 毎週日曜 JST 02:00（UTC 17:00 土曜）に実行
+    # 毎週日曜 JST 02:00（UTC 17:00）
     - cron: "0 17 * * 6"
   workflow_dispatch:
-    # 手動実行ボタン
     inputs:
       limit:
-        description: "取得件数上限（0=全件, テスト時は50）"
+        description: "取得件数上限（0=全件）"
         required: false
         default: "0"
       resume:
-        description: "差分取得モード（既存データを保持）"
+        description: "差分取得（既存データを保持）"
         required: false
         default: "true"
         type: choice
@@ -25,23 +24,38 @@ jobs:
       contents: write
 
     steps:
-      - name: チェックアウト
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Python 3.11 セットアップ
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Chrome インストール
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
+          sudo apt-get update -q
+          sudo apt-get install -y google-chrome-stable
 
-      - name: 依存パッケージをインストール
+      - name: 依存インストール
         run: pip install selenium webdriver-manager
 
-      - name: PMDA スクレイピング
+      - name: medicines.json が空なら既存データで初期化
+        run: |
+          python3 -c "
+          import json
+          from pathlib import Path
+          p = Path('scraper/medicines.json')
+          try:
+              d = json.loads(p.read_text())
+              meds = d.get('medicines', [])
+              print(f'既存データ: {len(meds)}件')
+          except:
+              p.write_text('{\"medicines\":[],\"updated_at\":\"\",\"total\":0}')
+              print('medicines.json を初期化しました')
+          "
+
+      - name: PMDAスクレイピング
         run: |
           LIMIT=${{ github.event.inputs.limit || '0' }}
           RESUME=${{ github.event.inputs.resume || 'true' }}
@@ -50,15 +64,15 @@ jobs:
           else
             python scraper/pmda_selenium.py --limit $LIMIT
           fi
-        timeout-minutes: 300   # 最大5時間（全件取得は数時間かかる場合あり）
+        timeout-minutes: 300
 
-      - name: index.html をビルド
+      - name: index.html ビルド
         run: python scraper/build.py --output index.html
 
-      - name: 変更をコミット＆プッシュ
+      - name: コミット＆プッシュ
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add index.html scraper/medicines.json scraper/scraper.log
-          git diff --staged --quiet || git commit -m "Weekly update: $(date '+%Y-%m-%d %H:%M JST' --date='+9 hours')"
+          git add index.html scraper/medicines.json
+          git diff --staged --quiet || git commit -m "PMDA update: $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST') $(python3 -c \"import json; d=json.load(open('scraper/medicines.json')); print(str(d.get('total',0))+'件')\")"
           git push
