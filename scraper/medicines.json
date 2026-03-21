@@ -1,1 +1,6 @@
-{"medicines":[],"updated_at":"","total":0}
+{
+  "medicines": [],
+  "updated_at": "2026-03-21T08:03:51.073955+00:00",
+  "total": 0,
+  "source": "pmda_selenium"
+}
