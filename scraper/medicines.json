@@ -1,0 +1,14 @@
+{"medicines": [], "updated_at": "", "total": 0}
+```
+
+---
+
+### ④ `scraper/requirements.txt` を作成
+```
+scraper/requirements.txt
+```
+
+内容：
+```
+selenium>=4.18.0
+webdriver-manager>=4.0.0
