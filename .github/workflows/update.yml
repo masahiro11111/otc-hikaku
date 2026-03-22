@@ -2,81 +2,112 @@ name: Weekly PMDA Update
 
 on:
   schedule:
+    # 毎週日曜 JST 02:00
     - cron: "0 17 * * 6"
   workflow_dispatch:
     inputs:
-      limit:
-        description: "取得件数上限（0=全件）"
+      group:
+        description: "取得グループ (all/hira/kata/alpha/resume)"
         required: false
-        default: "0"
-      resume:
-        description: "差分取得（既存データを保持）"
-        required: false
-        default: "true"
+        default: "all"
         type: choice
-        options: ["true", "false"]
+        options: ["all","hira","kata","alpha","resume"]
 
 jobs:
-  scrape-and-build:
+  # ── グループ1: ひらがな（あ〜ん）────────────────────
+  scrape-hira:
+    if: ${{ github.event.inputs.group == 'all' || github.event.inputs.group == 'hira' || github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Chrome インストール
         run: |
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-          sudo apt-get update -q
-          sudo apt-get install -y google-chrome-stable
-
+          sudo apt-get update -q && sudo apt-get install -y google-chrome-stable
       - name: 依存インストール
         run: pip install selenium webdriver-manager
-
-      - name: medicines.json 確認
-        run: |
-          python3 -c "
-          import json
-          from pathlib import Path
-          p = Path('scraper/medicines.json')
-          try:
-              d = json.loads(p.read_text())
-              print('既存データ:', len(d.get('medicines', [])), '件')
-          except Exception as e:
-              p.write_text('{\"medicines\":[],\"updated_at\":\"\",\"total\":0}')
-              print('初期化しました')
-          "
-
-      - name: PMDAスクレイピング
-        run: |
-          LIMIT=${{ github.event.inputs.limit || '0' }}
-          RESUME=${{ github.event.inputs.resume || 'true' }}
-          if [ "$RESUME" = "true" ]; then
-            python scraper/pmda_selenium.py --limit $LIMIT --resume
-          else
-            python scraper/pmda_selenium.py --limit $LIMIT
-          fi
-        timeout-minutes: 300
-
+      - name: スクレイピング（ひらがな）
+        run: python scraper/pmda_selenium.py --group hira --resume
+        timeout-minutes: 250
       - name: index.html ビルド
         run: python scraper/build.py --output index.html
-
-      - name: 件数を取得
-        id: count
+      - name: コミット
         run: |
-          COUNT=$(python3 -c "import json; d=json.load(open('scraper/medicines.json')); print(d.get('total',0))")
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
-
-      - name: コミット＆プッシュ
-        run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
           git add index.html scraper/medicines.json
-          git diff --staged --quiet || git commit -m "PMDA update: ${{ steps.count.outputs.count }}件"
+          git diff --staged --quiet || git commit -m "PMDA update hira"
+          git push
+
+  # ── グループ2: カタカナ（ア〜ン）────────────────────
+  scrape-kata:
+    if: ${{ github.event.inputs.group == 'all' || github.event.inputs.group == 'kata' || github.event_name == 'schedule' }}
+    needs: scrape-hira
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Chrome インストール
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
+          sudo apt-get update -q && sudo apt-get install -y google-chrome-stable
+      - name: 依存インストール
+        run: pip install selenium webdriver-manager
+      - name: スクレイピング（カタカナ）
+        run: python scraper/pmda_selenium.py --group kata --resume
+        timeout-minutes: 250
+      - name: index.html ビルド
+        run: python scraper/build.py --output index.html
+      - name: コミット
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
+          git add index.html scraper/medicines.json
+          git diff --staged --quiet || git commit -m "PMDA update kata"
+          git push
+
+  # ── グループ3: 英字・数字（A〜Z, 0〜9）─────────────
+  scrape-alpha:
+    if: ${{ github.event.inputs.group == 'all' || github.event.inputs.group == 'alpha' || github.event_name == 'schedule' }}
+    needs: scrape-kata
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Chrome インストール
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
+          sudo apt-get update -q && sudo apt-get install -y google-chrome-stable
+      - name: 依存インストール
+        run: pip install selenium webdriver-manager
+      - name: スクレイピング（英字・数字）
+        run: python scraper/pmda_selenium.py --group alpha --resume
+        timeout-minutes: 250
+      - name: index.html ビルド
+        run: python scraper/build.py --output index.html
+      - name: コミット
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
+          git add index.html scraper/medicines.json
+          git diff --staged --quiet || git commit -m "PMDA update alpha"
           git push
