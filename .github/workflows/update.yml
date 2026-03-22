@@ -2,112 +2,128 @@ name: Weekly PMDA Update
 
 on:
   schedule:
-    # 毎週日曜 JST 02:00
     - cron: "0 17 * * 6"
   workflow_dispatch:
     inputs:
       group:
-        description: "取得グループ (all/hira/kata/alpha/resume)"
+        description: "取得グループ (hira/kata/alpha/clean)"
         required: false
-        default: "all"
+        default: "hira"
         type: choice
-        options: ["all","hira","kata","alpha","resume"]
+        options: ["hira","kata","alpha","clean"]
+      limit:
+        description: "取得件数上限（0=無制限、テスト時は300など）"
+        required: false
+        default: "0"
 
 jobs:
-  # ── グループ1: ひらがな（あ〜ん）────────────────────
-  scrape-hira:
-    if: ${{ github.event.inputs.group == 'all' || github.event.inputs.group == 'hira' || github.event_name == 'schedule' }}
+  scrape:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Chrome インストール
-        run: |
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-          sudo apt-get update -q && sudo apt-get install -y google-chrome-stable
-      - name: 依存インストール
-        run: pip install selenium webdriver-manager
-      - name: スクレイピング（ひらがな）
-        run: python scraper/pmda_selenium.py --group hira --resume
-        timeout-minutes: 250
-      - name: index.html ビルド
-        run: python scraper/build.py --output index.html
-      - name: コミット
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase
-          git add index.html scraper/medicines.json
-          git diff --staged --quiet || git commit -m "PMDA update hira"
-          git push
 
-  # ── グループ2: カタカナ（ア〜ン）────────────────────
-  scrape-kata:
-    if: ${{ github.event.inputs.group == 'all' || github.event.inputs.group == 'kata' || github.event_name == 'schedule' }}
-    needs: scrape-hira
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Chrome インストール
-        run: |
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-          sudo apt-get update -q && sudo apt-get install -y google-chrome-stable
-      - name: 依存インストール
-        run: pip install selenium webdriver-manager
-      - name: スクレイピング（カタカナ）
-        run: python scraper/pmda_selenium.py --group kata --resume
-        timeout-minutes: 250
-      - name: index.html ビルド
-        run: python scraper/build.py --output index.html
-      - name: コミット
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase
-          git add index.html scraper/medicines.json
-          git diff --staged --quiet || git commit -m "PMDA update kata"
-          git push
 
-  # ── グループ3: 英字・数字（A〜Z, 0〜9）─────────────
-  scrape-alpha:
-    if: ${{ github.event.inputs.group == 'all' || github.event.inputs.group == 'alpha' || github.event_name == 'schedule' }}
-    needs: scrape-kata
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Chrome インストール
         run: |
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
           sudo apt-get update -q && sudo apt-get install -y google-chrome-stable
+
       - name: 依存インストール
         run: pip install selenium webdriver-manager
-      - name: スクレイピング（英字・数字）
-        run: python scraper/pmda_selenium.py --group alpha --resume
-        timeout-minutes: 250
-      - name: index.html ビルド
-        run: python scraper/build.py --output index.html
-      - name: コミット
+
+      - name: git 設定
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase
+
+      - name: medicines.json 確認・修復
+        run: |
+          python3 - << 'PYEOF'
+          import json
+          from pathlib import Path
+          p = Path('scraper/medicines.json')
+          try:
+              d = json.loads(p.read_text())
+              meds = d.get('medicines', [])
+              d['total'] = len(meds)
+              if 'updated_at' not in d:
+                  d['updated_at'] = ''
+              p.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+              print(f'medicines.json OK: {len(meds)}件')
+          except Exception as e:
+              print(f'修復: {e}')
+              p.write_text('{"medicines":[],"updated_at":"","total":0}')
+          PYEOF
+
+      - name: ゴミデータ除去
+        if: ${{ github.event.inputs.group == 'clean' }}
+        run: |
+          python3 - << 'PYEOF'
+          import json, re
+          from pathlib import Path
+          p = Path('scraper/medicines.json')
+          d = json.loads(p.read_text())
+          meds = d.get('medicines', [])
+          before = len(meds)
+          clean = [m for m in meds if (
+              m.get('name','') and len(m.get('name','')) >= 2 and
+              not re.match(r'^PDF\s*[\(\（]', m.get('name','')) and
+              not re.match(r'^\d{4}年', m.get('name','')) and
+              not re.match(r'^\d+$', m.get('name',''))
+          )]
+          d['medicines'] = clean
+          d['total'] = len(clean)
+          p.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+          print(f'クリーニング: {before}件 → {len(clean)}件')
+          PYEOF
+
+      - name: スクレイピング
+        if: ${{ github.event.inputs.group != 'clean' }}
+        run: |
+          LIMIT=${{ github.event.inputs.limit || '0' }}
+          python scraper/pmda_selenium.py \
+            --group "${{ github.event.inputs.group || 'hira' }}" \
+            --resume \
+            --limit $LIMIT
+        timeout-minutes: 245
+        continue-on-error: true
+
+      - name: ゴミデータ自動除去
+        if: ${{ github.event.inputs.group != 'clean' }}
+        run: |
+          python3 - << 'PYEOF'
+          import json, re
+          from pathlib import Path
+          p = Path('scraper/medicines.json')
+          d = json.loads(p.read_text())
+          meds = d.get('medicines', [])
+          before = len(meds)
+          clean = [m for m in meds if (
+              m.get('name','') and len(m.get('name','')) >= 2 and
+              not re.match(r'^PDF\s*[\(\（]', m.get('name','')) and
+              not re.match(r'^\d{4}年', m.get('name','')) and
+              not re.match(r'^\d+$', m.get('name',''))
+          )]
+          d['medicines'] = clean
+          d['total'] = len(clean)
+          p.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+          print(f'クリーニング: {before}件 → {len(clean)}件')
+          PYEOF
+
+      - name: index.html ビルド
+        run: python scraper/build.py --output index.html
+
+      - name: 最終コミット＆プッシュ
+        run: |
+          git pull --rebase 2>/dev/null || true
           git add index.html scraper/medicines.json
-          git diff --staged --quiet || git commit -m "PMDA update alpha"
+          COUNT=$(python3 -c "import json; d=json.load(open('scraper/medicines.json')); print(d.get('total',0))")
+          git diff --staged --quiet || git commit -m "PMDA update (${{ github.event.inputs.group }}): ${COUNT}件"
           git push
