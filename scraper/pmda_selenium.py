@@ -317,9 +317,23 @@ def load_existing():
     except Exception: return []
 
 def save(meds):
-    data={"medicines":meds,"updated_at":datetime.now(timezone.utc).isoformat(),"total":len(meds),"source":"pmda_selenium"}
+    import subprocess, os
+    data={"medicines":meds,"updated_at":datetime.now(timezone.utc).isoformat(),
+          "total":len(meds),"source":"pmda_selenium"}
     OUTPUT.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
     log(f"保存: {len(meds)}件")
+    if os.environ.get("GITHUB_ACTIONS"):
+        try:
+            subprocess.run(["git","pull","--rebase"],capture_output=True,timeout=30)
+            subprocess.run(["git","add",str(OUTPUT)],capture_output=True,timeout=10)
+            r=subprocess.run(["git","diff","--staged","--quiet"],capture_output=True)
+            if r.returncode!=0:
+                subprocess.run(["git","commit","-m",f"PMDA自動保存:{len(meds)}件"],
+                               capture_output=True,timeout=30)
+                subprocess.run(["git","push"],capture_output=True,timeout=60)
+                log(f"Gitコミット: {len(meds)}件")
+        except Exception as e:
+            log(f"コミットエラー(続行): {e}")
 
 def _merge(existing, new_items):
     seen,out=set(),[]
@@ -328,7 +342,7 @@ def _merge(existing, new_items):
         if n and n not in seen: seen.add(n); out.append(m)
     return out
 
-def run(group="hira", resume=False):
+def run(group="hira", resume=False, limit=0):
     keywords = GROUPS.get(group, GROUPS["hira"])
     log(f"PMDA スクレイパー開始 group={group} keywords={len(keywords)}個 resume={resume}")
 
@@ -349,12 +363,17 @@ def run(group="hira", resume=False):
 
             for item in kw_items:
                 if item["name"] in existing_names: continue
+                if limit and len(new_items) >= limit:
+                    log(f"limit={limit}件に達したため終了")
+                    break
                 log(f"  取得: {item['name']}")
                 det = get_detail(driver, item)
                 new_items.append(det)
                 existing_names.add(item["name"])
                 if len(new_items) % 100 == 0:
                     save(_merge(existing, new_items))
+            if limit and len(new_items) >= limit:
+                break
 
             time.sleep(0.5)
 
@@ -367,11 +386,44 @@ def run(group="hira", resume=False):
     save(merged)
     log(f"完了: 新規{len(new_items)}件 / 合計{len(merged)}件")
 
+def git_commit(msg):
+    """途中データをgitコミット"""
+    import subprocess
+    try:
+        subprocess.run(["git", "pull", "--rebase"], capture_output=True)
+        subprocess.run(["git", "add", str(OUTPUT)], capture_output=True)
+        r = subprocess.run(["git", "diff", "--staged", "--quiet"], capture_output=True)
+        if r.returncode != 0:
+            subprocess.run(["git", "commit", "-m", msg], capture_output=True)
+            subprocess.run(["git", "push"], capture_output=True)
+            log(f"自動コミット: {msg}")
+    except Exception as e:
+        log(f"コミットエラー（続行）: {e}")
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--group",  default="hira",
                    choices=["hira","kata","alpha"],
                    help="取得グループ: hira(ひらがな) / kata(カタカナ) / alpha(英字・数字)")
     p.add_argument("--resume", action="store_true", help="既存データを保持")
+    p.add_argument("--limit",  type=int, default=0, help="取得件数上限（0=無制限）")
+    p.add_argument("--auto-commit", action="store_true", help="200件ごとに自動gitコミット")
     a = p.parse_args()
-    run(group=a.group, resume=a.resume)
+
+    # auto-commit用にrun関数をラップ
+    if a.auto_commit:
+        import functools
+        _orig_save = save
+        _commit_count = [0]
+        def _save_with_commit(meds):
+            _orig_save(meds)
+            _commit_count[0] += 1
+            if _commit_count[0] % 2 == 0:  # 2回保存(=200件)ごとにコミット
+                git_commit(f"PMDA 中間保存: {len(meds)}件")
+        import builtins
+        # saveをモンキーパッチ
+        import sys
+        this_module = sys.modules[__name__]
+        setattr(this_module, 'save', _save_with_commit)
+
+    run(group=a.group, resume=a.resume, limit=a.limit)
